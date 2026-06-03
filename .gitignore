@@ -1,0 +1,14 @@
+# ESP-IDF build output
+build/
+sdkconfig
+sdkconfig.old
+
+# VSCode
+.vscode/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# MacOS (jaga-jaga)
+.DS_Store
