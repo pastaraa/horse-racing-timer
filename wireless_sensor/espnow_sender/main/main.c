@@ -7,18 +7,36 @@
 #include "esp_wifi.h"
 #include "esp_now.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "driver/gpio.h"
 
 #define LED_PIN GPIO_NUM_2
-#define SEND_INTERVAL_MS 500
+#define SEND_INTERVAL_MS 3000
 
 static const char *TAG = "ESPNOW_SENDER";
 static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
+// Jenis event
+typedef enum {
+    EVENT_START  = 1,
+    EVENT_FINISH = 2,
+} race_event_t;
+
+// Paket data yang dikirim
 typedef struct {
-    uint32_t counter;
-    char message[32];
-} espnow_data_t;
+    race_event_t event;
+    uint8_t sensor_id;
+    uint8_t minutes;
+    uint8_t seconds;
+    uint16_t milliseconds;
+} race_data_t;
+
+// Fungsi konversi waktu dari millisecond total
+static void ms_to_time(uint32_t total_ms, uint8_t *min, uint8_t *sec, uint16_t *ms) {
+    *ms  = total_ms % 1000;
+    *sec = (total_ms / 1000) % 60;
+    *min = (total_ms / 60000);
+}
 
 static void on_data_sent(const wifi_tx_info_t *tx_info, esp_now_send_status_t status) {
     if (status == ESP_NOW_SEND_SUCCESS) {
@@ -32,12 +50,24 @@ static void on_data_sent(const wifi_tx_info_t *tx_info, esp_now_send_status_t st
 }
 
 static void espnow_send_task(void *pvParameter) {
-    espnow_data_t data = {0};
+    race_data_t data = {0};
+    bool is_start = true; // toggle START/FINISH
+
     while (1) {
-        data.counter++;
-        snprintf(data.message, sizeof(data.message), "ping-%lu", data.counter);
+        uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000);
+
+        data.event     = is_start ? EVENT_START : EVENT_FINISH;
+        data.sensor_id = is_start ? 1 : 2;
+        ms_to_time(now_ms, &data.minutes, &data.seconds, &data.milliseconds);
+
         esp_now_send(broadcast_mac, (uint8_t *)&data, sizeof(data));
-        ESP_LOGI(TAG, "Sending counter: %lu", data.counter);
+
+        ESP_LOGI(TAG, "Sending event: %s | sensor: %d | time: %02d:%02d:%03d",
+                 data.event == EVENT_START ? "START" : "FINISH",
+                 data.sensor_id,
+                 data.minutes, data.seconds, data.milliseconds);
+
+        is_start = !is_start; // toggle
         vTaskDelay(pdMS_TO_TICKS(SEND_INTERVAL_MS));
     }
 }
