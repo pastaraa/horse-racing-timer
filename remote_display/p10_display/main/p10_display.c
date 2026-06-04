@@ -5,6 +5,11 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_wifi.h"
+#include "esp_now.h"
+#include "esp_netif.h"
+#include "esp_event.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "P10_DISPLAY";
 
@@ -24,6 +29,20 @@ static const char *TAG = "P10_DISPLAY";
 #define TOTAL_WIDTH     (PANEL_WIDTH  * PANELS_X)
 #define TOTAL_HEIGHT    (PANEL_HEIGHT * PANELS_Y)
 #define SCAN_ROWS       4
+
+// ─── Race Data ───────────────────────────────────────────────────
+typedef enum {
+    EVENT_START  = 1,
+    EVENT_FINISH = 2,
+} race_event_t;
+
+typedef struct {
+    race_event_t event;
+    uint8_t      sensor_id;
+    uint8_t      minutes;
+    uint8_t      seconds;
+    uint16_t     milliseconds;
+} race_data_t;
 
 // ─── Font 8x16 ───────────────────────────────────────────────────
 static const uint8_t font8x16[][16] = {
@@ -93,7 +112,7 @@ static void p10_spi_init(void)
     ESP_LOGI(TAG, "SPI initialized");
 }
 
-// ─── Set / Clear satu pixel ──────────────────────────────────────
+// ─── Set pixel ───────────────────────────────────────────────────
 static void p10_set_pixel(int x, int y, uint8_t on)
 {
     if (x < 0 || x >= TOTAL_WIDTH || y < 0 || y >= TOTAL_HEIGHT) return;
@@ -106,13 +125,13 @@ static void p10_set_pixel(int x, int y, uint8_t on)
     }
 }
 
-// ─── Clear seluruh display ───────────────────────────────────────
+// ─── Clear display ───────────────────────────────────────────────
 static void p10_clear(void)
 {
     memset(framebuffer, 0, sizeof(framebuffer));
 }
 
-// ─── Draw satu karakter ──────────────────────────────────────────
+// ─── Draw karakter ───────────────────────────────────────────────
 static void p10_draw_char(char ch, int x, int y)
 {
     int idx;
@@ -124,8 +143,7 @@ static void p10_draw_char(char ch, int x, int y)
     for (int row = 0; row < 16; row++) {
         uint8_t bits = font8x16[idx][row];
         for (int col = 0; col < 8; col++) {
-            uint8_t pixel_on = (bits >> (7 - col)) & 1;
-            p10_set_pixel(x + col, y + row, pixel_on);
+            p10_set_pixel(x + col, y + row, (bits >> (7 - col)) & 1);
         }
     }
 }
@@ -140,6 +158,20 @@ static void p10_draw_string(const char *str, int x, int y)
     }
 }
 
+// ─── Update display dengan data race ─────────────────────────────
+static void p10_update_timer(race_data_t *data)
+{
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%02d:%02d:%03d",
+             data->minutes,
+             data->seconds,
+             data->milliseconds);
+
+    p10_clear();
+    p10_draw_string(buf, 0, 16);  // tengah vertikal (y=16 dari 48)
+    ESP_LOGI(TAG, "Display updated: %s", buf);
+}
+
 // ─── Kirim satu scan row ─────────────────────────────────────────
 static void p10_send_row(uint8_t scan_row)
 {
@@ -147,13 +179,11 @@ static void p10_send_row(uint8_t scan_row)
     memcpy(row_data, framebuffer[scan_row], FB_ROW_BYTES);
 
     gpio_set_level(PIN_OE, 1);
-
     spi_transaction_t t = {
         .length    = FB_ROW_BYTES * 8,
         .tx_buffer = row_data,
     };
     spi_device_transmit(spi, &t);
-
     gpio_set_level(PIN_A, (scan_row >> 0) & 1);
     gpio_set_level(PIN_B, (scan_row >> 1) & 1);
     gpio_set_level(PIN_LAT, 1);
@@ -172,13 +202,60 @@ static void p10_refresh_task(void *pvParameter)
     }
 }
 
+// ─── ESP-NOW Receive Callback ────────────────────────────────────
+static void on_data_recv(const esp_now_recv_info_t *recv_info,
+                         const uint8_t *data, int len)
+{
+    if (len != sizeof(race_data_t)) {
+        ESP_LOGW(TAG, "Data size mismatch: %d", len);
+        return;
+    }
+
+    race_data_t recv_data;
+    memcpy(&recv_data, data, sizeof(race_data_t));
+
+    ESP_LOGI(TAG, "Received event=%d sensor=%d time=%02d:%02d:%03d",
+             recv_data.event,
+             recv_data.sensor_id,
+             recv_data.minutes,
+             recv_data.seconds,
+             recv_data.milliseconds);
+
+    p10_update_timer(&recv_data);
+}
+
+// ─── Inisialisasi ESP-NOW ────────────────────────────────────────
+static void espnow_init(void)
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
+        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        nvs_flash_erase();
+        nvs_flash_init();
+    }
+
+    esp_netif_init();
+    esp_event_loop_create_default();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_start();
+
+    esp_now_init();
+    esp_now_register_recv_cb(on_data_recv);
+
+    ESP_LOGI(TAG, "ESP-NOW initialized, waiting for data...");
+}
+
 // ─── App Main ────────────────────────────────────────────────────
 void app_main(void)
 {
     ESP_LOGI(TAG, "P10 Display starting...");
     p10_clear();
+
     p10_gpio_init();
     p10_spi_init();
+    espnow_init();
 
     xTaskCreatePinnedToCore(
         p10_refresh_task,
@@ -190,8 +267,9 @@ void app_main(void)
         1
     );
 
-    // Test: tampilkan timer dummy
-    p10_draw_string("01:23:456", 0, 0);
+    // Tampilkan "00:00:000" saat pertama nyala
+    race_data_t idle = {0};
+    p10_update_timer(&idle);
 
-    ESP_LOGI(TAG, "Display running! %dx%d px", TOTAL_WIDTH, TOTAL_HEIGHT);
+    ESP_LOGI(TAG, "Display ready! Waiting for race data...");
 }
