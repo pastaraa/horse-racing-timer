@@ -1,95 +1,53 @@
+#include <stdio.h>
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs_flash.h"
-#include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_now.h"
-#include "esp_log.h"
+#include "driver/uart.h"
 
-static const char *TAG = "JUDGE_CTRL";
+#define UART_NUM    UART_NUM_0
+#define BUF_SIZE    256
+#define MAX_CMD_LEN 64
 
-// ─── ESP-NOW ─────────────────────────────────────────────────────
-static uint8_t broadcast_mac[] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
-// ─── Race Data ───────────────────────────────────────────────────
-typedef enum {
-    EVENT_START  = 1,
-    EVENT_FINISH = 2,
-} race_event_t;
-
-typedef struct {
-    race_event_t event;
-    uint8_t      sensor_id;
-    uint8_t      minutes;
-    uint8_t      seconds;
-    uint16_t     milliseconds;
-} race_data_t;
-
-// ─── Forward data ke Remote Display via ESP-NOW ──────────────────
-static void forward_to_display(race_data_t *data)
+static void uart_task(void *pvParameter)
 {
-    esp_now_send(broadcast_mac, (uint8_t *)data, sizeof(race_data_t));
-    ESP_LOGI(TAG, "Forwarded to display: %s | %02d:%02d:%03d",
-             data->event == EVENT_START ? "START" : "FINISH",
-             data->minutes, data->seconds, data->milliseconds);
-}
+    char cmd_buf[MAX_CMD_LEN];
+    int  cmd_idx = 0;
+    uint8_t byte;
 
-// ─── TODO: Kirim ke laptop Om Yudi via WiFi ──────────────────────
-// Akan diimplementasi setelah brief dengan Om Yudi
-static void send_to_laptop(race_data_t *data)
-{
-    // placeholder
-    ESP_LOGI(TAG, "TODO: send to laptop app");
-}
+    while (1) {
+        int len = uart_read_bytes(UART_NUM, &byte, 1, portMAX_DELAY);
+        if (len <= 0) continue;
 
-// ─── ESP-NOW Receive Callback ────────────────────────────────────
-static void on_data_recv(const esp_now_recv_info_t *recv_info,
-                         const uint8_t *data, int len)
-{
-    if (len != sizeof(race_data_t)) {
-        ESP_LOGW(TAG, "Data size mismatch: %d", len);
-        return;
+        if (byte == '\r' || byte == '\n') {
+            if (cmd_idx > 0) {
+                cmd_buf[cmd_idx] = '\0';
+
+                char reply[MAX_CMD_LEN + 8];
+                snprintf(reply, sizeof(reply), "ok_%s\r\n", cmd_buf);
+                uart_write_bytes(UART_NUM, reply, strlen(reply));
+
+                cmd_idx = 0;
+            }
+        } else {
+            if (cmd_idx < MAX_CMD_LEN - 1) {
+                cmd_buf[cmd_idx++] = (char)byte;
+            }
+        }
     }
-
-    race_data_t recv_data;
-    memcpy(&recv_data, data, sizeof(race_data_t));
-
-    ESP_LOGI(TAG, "Received %s from sensor %d | %02d:%02d:%03d",
-             recv_data.event == EVENT_START ? "START" : "FINISH",
-             recv_data.sensor_id,
-             recv_data.minutes, recv_data.seconds, recv_data.milliseconds);
-
-    forward_to_display(&recv_data);
-    send_to_laptop(&recv_data);
 }
 
-// ─── App Main ────────────────────────────────────────────────────
 void app_main(void)
 {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
+    uart_config_t uart_config = {
+        .baud_rate = 115200,
+        .data_bits = UART_DATA_8_BITS,
+        .parity    = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+    };
+    uart_driver_install(UART_NUM, BUF_SIZE * 2, 0, 0, NULL, 0);
+    uart_param_config(UART_NUM, &uart_config);
 
-    esp_netif_init();
-    esp_event_loop_create_default();
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_start();
-
-    esp_now_init();
-    esp_now_register_recv_cb(on_data_recv);
-
-    esp_now_peer_info_t peer_info = {};
-    memcpy(peer_info.peer_addr, broadcast_mac, 6);
-    peer_info.channel = 0;
-    peer_info.encrypt = false;
-    esp_now_add_peer(&peer_info);
-
-    ESP_LOGI(TAG, "Judge Controller ready, waiting for sensor data...");
+    xTaskCreate(uart_task, "uart_task", 2048, NULL, 5, NULL);
 }
