@@ -4,11 +4,6 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
-#include "esp_rom_sys.h"
-#include "nvs_flash.h"
-#include "esp_netif.h"
-#include "esp_wifi.h"
-#include "esp_now.h"
 
 static const char *TAG = "P10_DISPLAY";
 
@@ -27,28 +22,6 @@ static const char *TAG = "P10_DISPLAY";
 #define TOTAL_HEIGHT    PANEL_HEIGHT
 #define SCAN_ROWS       4
 #define FB_ROW_BYTES    (TOTAL_WIDTH / 8)
-
-#define BRIGHTNESS_US   200
-
-// ─── ESP-NOW PACKET ──────────────────────────────────────────────
-#define CMD_PREPARE   0x47
-#define CMD_START     0x51
-#define CMD_FAULT     0x48
-#define CMD_REFUSAL   0x49
-#define CMD_ELIMINATE 0x4A
-#define CMD_PHASE1    0x52
-#define CMD_FINISH    0x53
-#define CMD_HEARTBEAT 0x63
-
-typedef struct {
-    uint8_t  ver;
-    uint8_t  cmd;
-    uint8_t  p1Mode;
-    uint8_t  p2Mode;
-    uint8_t  p1Time;
-    uint8_t  p2Time;
-    uint32_t timeStamp;
-} __attribute__((packed)) espnow_msg_t;
 
 // ─── FRAMEBUFFER & SPI ───────────────────────────────────────────
 static uint8_t framebuffer[TOTAL_HEIGHT][FB_ROW_BYTES];
@@ -101,6 +74,26 @@ static const font_glyph_t font_table[] = {
     {' ', {0x00,0x00,0x00,0x00,0x00,0x00,0x00}},
 };
 #define FONT_TABLE_SIZE (sizeof(font_table) / sizeof(font_table[0]))
+
+// ─── LOGO BITMAP ─────────────────────────────────────────────────
+static const uint8_t logo_bitmap[TOTAL_HEIGHT][FB_ROW_BYTES] = {
+    {0x00,0x01,0xFB,0xFF,0xE1,0xFF,0xEF,0xFC,0xFF,0xE7,0x80,0x0F},
+    {0x00,0x03,0xFB,0xFF,0xF1,0xFF,0xEF,0xFD,0xFF,0xF7,0xC0,0x1F},
+    {0x00,0x07,0xFB,0xFF,0xF1,0xFF,0xEF,0xFD,0xFF,0xF7,0xE0,0x3F},
+    {0x00,0x0F,0xFB,0xC0,0xF0,0x1E,0x0F,0x01,0xE0,0xF7,0xF0,0x7F},
+    {0x00,0x1F,0x7B,0xC0,0xF0,0x1E,0x0F,0x01,0xE0,0xF7,0xF8,0xFF},
+    {0x00,0x3E,0x7B,0xC0,0xF0,0x1E,0x0F,0x01,0xE0,0xF7,0xBD,0xEF},
+    {0x00,0x7C,0x7B,0xC0,0xF0,0x1E,0x0F,0x01,0xE0,0xF7,0x9F,0xCF},
+    {0x00,0xFF,0xFB,0xFF,0xF0,0x1E,0x0F,0xF9,0xFF,0xF7,0x8F,0x8F},
+    {0x01,0xFF,0xFB,0xFF,0xF0,0x1E,0x0F,0xF9,0xFF,0xF7,0x87,0x0F},
+    {0x03,0xFF,0xFB,0xFF,0xE0,0x1E,0x0F,0x01,0xFF,0xF7,0x82,0x0F},
+    {0x07,0xE0,0x7B,0xFF,0x00,0x1E,0x0F,0x01,0xE0,0xF7,0x80,0x0F},
+    {0x0F,0xC0,0x7B,0xCF,0x80,0x1E,0x0F,0x01,0xE0,0xF7,0x80,0x0F},
+    {0x1F,0x80,0x7B,0xC7,0xC0,0x1E,0x0F,0x01,0xE0,0xF7,0x80,0x0F},
+    {0x3F,0x00,0x7B,0xC3,0xE0,0x1E,0x0F,0xFD,0xE0,0xF7,0x80,0x0F},
+    {0x7E,0x00,0x7B,0xC1,0xF0,0x1E,0x0F,0xFD,0xE0,0xF7,0x80,0x0F},
+    {0xFC,0x00,0x7B,0xC0,0xF0,0x1E,0x0F,0xFD,0xE0,0xF7,0x80,0x0F},
+};
 
 // ─── DISPLAY FUNCTIONS ───────────────────────────────────────────
 static void p10_gpio_init(void)
@@ -155,6 +148,15 @@ static void p10_set_pixel(int x, int y, uint8_t on)
 static void p10_clear(void)
 {
     memset(framebuffer, 0xff, sizeof(framebuffer));
+}
+
+static void p10_draw_logo(void)
+{
+    for (int y = 0; y < TOTAL_HEIGHT; y++) {
+        for (int x = 0; x < FB_ROW_BYTES; x++) {
+            framebuffer[y][x] = ~logo_bitmap[y][x];
+        }
+    }
 }
 
 static const uint8_t* font_find(char c)
@@ -219,7 +221,6 @@ static void p10_send_row(uint8_t scan_row)
     gpio_set_level(PIN_B,   (scan_row >> 1) & 1);
     gpio_set_level(PIN_LAT, 1);
     gpio_set_level(PIN_LAT, 0);
-    esp_rom_delay_us(BRIGHTNESS_US);
     gpio_set_level(PIN_OE,  0);
 }
 
@@ -233,86 +234,6 @@ static void p10_refresh_task(void *pvParameter)
     }
 }
 
-// ─── ESP-NOW RECEIVER ────────────────────────────────────────────
-static void on_data_recv(const esp_now_recv_info_t *recv_info,
-                         const uint8_t *data, int len)
-{
-    if (len != sizeof(espnow_msg_t)) {
-        ESP_LOGW(TAG, "Paket ukuran tidak dikenal: %d bytes", len);
-        return;
-    }
-
-    espnow_msg_t *msg = (espnow_msg_t *)data;
-
-    switch (msg->cmd) {
-        case CMD_PREPARE:
-            ESP_LOGI(TAG, "CMD: PREPARE");
-            p10_clear();
-            p10_draw_string_centered("PREPARE");
-            break;
-        case CMD_START:
-            ESP_LOGI(TAG, "CMD: START");
-            p10_clear();
-            p10_draw_string_centered("START");
-            break;
-        case CMD_FAULT:
-            ESP_LOGI(TAG, "CMD: FAULT");
-            p10_clear();
-            p10_draw_string_centered("FAULT");
-            break;
-        case CMD_REFUSAL:
-            ESP_LOGI(TAG, "CMD: REFUSAL");
-            p10_clear();
-            p10_draw_string_centered("REFUSAL");
-            break;
-        case CMD_ELIMINATE:
-            ESP_LOGI(TAG, "CMD: ELIMINATE");
-            p10_clear();
-            p10_draw_string_centered("ELIMINATE");
-            break;
-        case CMD_PHASE1:
-            ESP_LOGI(TAG, "CMD: PHASE1");
-            p10_clear();
-            p10_draw_string_centered("PHASE1");
-            break;
-        case CMD_FINISH:
-            ESP_LOGI(TAG, "CMD: FINISH");
-            p10_clear();
-            p10_draw_string_centered("FINISH");
-            break;
-        case CMD_HEARTBEAT:
-            ESP_LOGI(TAG, "CMD: HEARTBEAT");
-            break;
-        default:
-            ESP_LOGW(TAG, "CMD tidak dikenal: 0x%02X", msg->cmd);
-            break;
-    }
-}
-
-static void espnow_init(void)
-{
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        nvs_flash_erase();
-        nvs_flash_init();
-    }
-
-    esp_netif_init();
-    esp_event_loop_create_default();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_wifi_init(&cfg);
-    esp_wifi_set_mode(WIFI_MODE_STA);
-    esp_wifi_set_channel(6, WIFI_SECOND_CHAN_NONE);
-    esp_wifi_start();
-
-    esp_now_init();
-    esp_now_register_recv_cb(on_data_recv);
-
-    ESP_LOGI(TAG, "ESP-NOW receiver ready");
-}
-
 // ─── MAIN ────────────────────────────────────────────────────────
 void app_main(void)
 {
@@ -320,9 +241,7 @@ void app_main(void)
     p10_gpio_init();
     p10_spi_init();
     p10_clear();
-    p10_draw_string_centered("READY");
-
-    espnow_init();
+    p10_draw_logo();
 
     xTaskCreatePinnedToCore(p10_refresh_task, "p10_refresh", 4096, NULL, 5, NULL, 1);
 }
