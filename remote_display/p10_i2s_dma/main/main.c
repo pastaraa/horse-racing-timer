@@ -7,11 +7,23 @@ void app_main(void)
 {
     p10_init();
 
-    p10_clear();
-
-    p10_draw_logo();
+    int counter = 0; 
+    char time_str[20]; 
 
     while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        p10_clear();
+
+        int detik = counter / 10;      
+        int desimal = counter % 10;     
+
+        snprintf(time_str, sizeof(time_str), "%d.%d", detik, desimal);
+
+        p10_string_to_buffer(time_str, 0, 0, ALIGN_CENTER, ALIGN_MIDDLE);
+
+        counter++; 
+
+        if (counter > 600) counter = 0; 
+
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
