@@ -9,8 +9,13 @@
 #include "freertos/task.h"
 #include "driver/spi_master.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
+
+#define ROW_PERIOD_US  1000
 
 static const char *TAG = "P10_DISPLAY";
+static uint32_t ton_us = 1000;
+static uint32_t toff_us = 0;
 
 // Framebuffer global 
 static uint8_t framebuffer[TOTAL_HEIGHT][FB_ROW_BYTES];
@@ -56,24 +61,44 @@ static void p10_send_row(uint8_t scan_row) {
             scan_buffer[idx++] = framebuffer[scan_row     ][byte_idx];
         }
     }
-    gpio_set_level(PIN_OE, 1);
+    
+    gpio_set_level(PIN_OE, 1); // Matikan display dulu saat kirim data (mencegah ghosting)
+    
     spi_transaction_t t = {
         .length    = sizeof(scan_buffer) * 8,
         .tx_buffer = scan_buffer,
     };
     spi_device_transmit(spi, &t);
+    
     gpio_set_level(PIN_A,   (scan_row >> 0) & 1);
     gpio_set_level(PIN_B,   (scan_row >> 1) & 1);
+    
     gpio_set_level(PIN_LAT, 1);
     gpio_set_level(PIN_LAT, 0);
-    gpio_set_level(PIN_OE,  0);
+
+    // ─── DI SINI EMBED LOGIKA PWM OM YUDI ───
+    // Nyalakan LED sesuai durasi TON (OE: 0 = Nyala)
+    if (ton_us > 0) {
+        gpio_set_level(PIN_OE, 0); 
+        esp_rom_delay_us(ton_us);
+    }
+
+    // Matikan LED sesuai durasi TOFF (OE: 1 = Mati)
+    if (toff_us > 0) {
+        gpio_set_level(PIN_OE, 1); 
+        esp_rom_delay_us(toff_us);
+    }
 }
 
 static void p10_refresh_task(void *pvParameter) {
-    uint8_t scan_row = 0;
     while (1) {
-        p10_send_row(scan_row);
-        scan_row = (scan_row + 1) % SCAN_ROWS;
+        // Scan semua 4 baris bergantian dalam satu putaran penuh
+        for (uint8_t scan_row = 0; scan_row < SCAN_ROWS; scan_row++) {
+            p10_send_row(scan_row);
+        }
+        
+        // Kasih napas 1 tick RTOS ke CPU setelah menyelesaikan 1 full frame scanning.
+        // Ini menjaga refresh rate tetap tinggi (~200Hz) dan OS tetap stabil.
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
@@ -104,7 +129,7 @@ void p10_init(void) {
     spi_bus_initialize(VSPI_HOST, &bus_cfg, SPI_DMA_CH_AUTO);
 
     spi_device_interface_config_t dev_cfg = {
-        .clock_speed_hz = 1000000,
+        .clock_speed_hz = 4000000,
         .mode           = 0,
         .spics_io_num   = -1,
         .queue_size     = 1,
@@ -159,4 +184,11 @@ void p10_timestamp_to_buffer(long timestamp, int x, int y, p10_align_h_t align_h
     char str_buff[32];
     snprintf(str_buff, sizeof(str_buff), "%ld", timestamp);
     p10_string_to_buffer(str_buff, x, y, align_h, align_v);
+}
+
+void p10_set_brightness(uint8_t persentase) {
+    if (persentase > 100) persentase = 100;
+    uint8_t inverted = 100 - persentase;
+    ton_us  = (ROW_PERIOD_US * inverted) / 100;
+    toff_us = ROW_PERIOD_US - ton_us;
 }
