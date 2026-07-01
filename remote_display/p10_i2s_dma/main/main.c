@@ -86,11 +86,9 @@ void handle_cmd(uint8_t cmd) {
 }
 
 static void on_data_recv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
-    ESP_LOGI(TAG, "Packet masuk! len=%d", len);
-    for (int i = 0; i < len; i++) {
-        ESP_LOGI(TAG, "  data[%d] = 0x%02X (%d)", i, data[i], data[i]);
-    }
-    handle_cmd(data[0]);
+    if (len < 2) return;
+    ESP_LOGI(TAG, "Packet masuk! CMD=0x%02X", data[1]);
+    handle_cmd(data[1]);
 }
 
 static void espnow_init(void) {
@@ -187,14 +185,14 @@ static void display_task(void *pv) {
                 break;
             }
             case STATE_ELIMINATE:
-                p10_string_to_buffer("ELIMINATE", 0, 0, ALIGN_CENTER, ALIGN_MIDDLE);
-                break;
+                 p10_draw_eliminate();
+                 break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
-void app_main(void) {
+void app_main(void) { 
     espnow_init();
     p10_init();
     p10_set_brightness(50);

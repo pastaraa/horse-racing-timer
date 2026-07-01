@@ -18,6 +18,7 @@ typedef enum {
 void p10_init(void);
 void p10_clear(void);
 void p10_draw_logo(void);
+void p10_draw_eliminate(void);
 
 void p10_string_to_buffer(const char *str, int x, int y, p10_align_h_t align_h, p10_align_v_t align_v);
 void p10_int_to_buffer(int angka, int x, int y, p10_align_h_t align_h, p10_align_v_t align_v);

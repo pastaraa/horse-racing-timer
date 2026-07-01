@@ -2,6 +2,7 @@
 #include "p10_config.h"
 #include "p10_font.h"
 #include "p10_logo.h"
+#include "p10_eliminate.h"
 
 #include <string.h>
 #include <stdio.h>
@@ -191,4 +192,12 @@ void p10_set_brightness(uint8_t persentase) {
     uint8_t inverted = 100 - persentase;
     ton_us  = (ROW_PERIOD_US * inverted) / 100;
     toff_us = ROW_PERIOD_US - ton_us;
+}
+
+void p10_draw_eliminate(void) {
+    for (int y = 0; y < TOTAL_HEIGHT; y++) {
+        for (int x = 0; x < FB_ROW_BYTES; x++) {
+            framebuffer[y][x] = ~eliminate_bitmap[y][x];
+        }
+    }
 }
